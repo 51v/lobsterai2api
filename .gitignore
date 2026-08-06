@@ -1,0 +1,26 @@
+# 敏感文件 — 绝不提交
+config.json
+auths/
+data/
+
+# 编译产物
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Go 构建缓存
+*.test
+*.out
+
+# IDE / 编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
