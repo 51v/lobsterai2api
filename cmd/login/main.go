@@ -29,7 +29,6 @@ import (
 )
 
 const (
-	serverBase      = "UPSTREAM_BASE"
 	clientUA        = "LobsterAI/0.1.0"
 	stateFile       = "/tmp/lb2api-login-state.json"
 	authsDir        = "./auths"
@@ -37,6 +36,24 @@ const (
 	callbackTimeout = 10 * time.Minute
 	loginCallbackHost = "127.0.0.1"
 )
+
+// serverBase reads upstream API base from LB2A_UPSTREAM_BASE env.
+func serverBase() string {
+	if v := os.Getenv("LB2A_UPSTREAM_BASE"); v != "" {
+		return strings.TrimRight(v, "/")
+	}
+	fatal("LB2A_UPSTREAM_BASE env not set — cannot determine upstream server")
+	return ""
+}
+
+// loginPortalURL reads the login portal URL from LB2A_LOGIN_PORTAL env.
+func loginPortalURL() string {
+	if v := os.Getenv("LB2A_LOGIN_PORTAL"); v != "" {
+		return v
+	}
+	fatal("LB2A_LOGIN_PORTAL env not set — cannot determine login portal URL")
+	return ""
+}
 
 type loginState struct {
 	Port         int    `json:"port"`
@@ -206,8 +223,8 @@ func runUrl() {
 	// 登录页校验 redirect_uri 必须是 http://127.0.0.1:{port}/auth/callback
 	// 登录成功后前端导航到该回调 → code → exchange
 	redirectURI := fmt.Sprintf("http://%s:%d%s", loginCallbackHost, port, callbackPath)
-	loginURL := fmt.Sprintf("UPSTREAM_PORTAL/portal#/login?source=electron&redirect_uri=%s&state=%s",
-		urlQueryEscape(redirectURI), state)
+	loginURL := fmt.Sprintf("%s/portal#/login?source=electron&redirect_uri=%s&state=%s",
+		loginPortalURL(), urlQueryEscape(redirectURI), state)
 	fmt.Println(loginURL)
 
 	// 等待回调完成或超时后自动关闭
@@ -252,7 +269,7 @@ func exchange(ls loginState, code string) []byte {
 		"version":       "0.1.0",
 	}
 	raw, _ := json.Marshal(body)
-	data, err := doJSON(http.MethodPost, serverBase+"/api/auth/exchange", raw)
+	data, err := doJSON(http.MethodPost, serverBase()+"/api/auth/exchange", raw)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "login: exchange: %v\n", err)
 		return nil

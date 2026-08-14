@@ -83,6 +83,8 @@ See `config.example.json`. Environment variable prefix `LB2A_*`:
 | `LB2A_HARD_CREDIT` / `LB2A_SOFT_RATE` | Cooldown durations |
 | `LB2A_ERR_THRESHOLD` / `LB2A_ERR_COOLDOWN` | Error threshold and cooldown |
 | `LB2A_TIMEOUT_SECONDS` | Upstream timeout |
+| `LB2A_UPSTREAM_BASE` | Upstream API base URL (required) |
+| `LB2A_LOGIN_PORTAL` | Login portal URL for OAuth flow (required for login) |
 
 ## Features
 

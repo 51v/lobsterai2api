@@ -5,7 +5,7 @@
 //	go run ./cmd/credit        # 或编译后 ./credit
 //	go run ./cmd/credit -pretty  # 人类可读
 //
-// 接口: GET UPSTREAM_BASE/api/user/quota
+// 接口: GET {upstream}/api/user/quota
 // 响应: {code:0, data:{freeCreditsTotal, freeCreditsUsed, ...}}
 package main
 
@@ -16,10 +16,18 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
-const serverBase = "UPSTREAM_BASE"
+func serverBase() string {
+	if v := os.Getenv("LB2A_UPSTREAM_BASE"); v != "" {
+		return strings.TrimRight(v, "/")
+	}
+	fmt.Fprintln(os.Stderr, "credit: LB2A_UPSTREAM_BASE env not set")
+	os.Exit(1)
+	return ""
+}
 
 type authFile struct {
 	Auth struct {
@@ -46,7 +54,7 @@ type accountResult struct {
 // fetchQuota 查单账号积分（用 profile-summary，包含 free + campaign 活动积分）。
 // quota 接口只显示 freeCreditsTotal=300，profile-summary 才有 totalCreditsRemaining（如 5297.72）。
 func fetchQuota(af *authFile) (remain, total int64, err error) {
-	req, err := http.NewRequest(http.MethodGet, serverBase+"/api/user/profile-summary", nil)
+	req, err := http.NewRequest(http.MethodGet, serverBase()+"/api/user/profile-summary", nil)
 	if err != nil {
 		return 0, 0, err
 	}
