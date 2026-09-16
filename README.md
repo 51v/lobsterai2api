@@ -17,6 +17,16 @@ upstream chat API (SSE only)
    ▼ on error → classify → cooldown/disable → rotate to next account (max 3)
 ```
 
+## Web Console (built-in, second development)
+
+A web console is mounted at `/console` on the same port as the API (shares `api_key` auth):
+
+- **Add account**: click "开始授权" → open login URL in browser (incognito recommended) → after login the page redirects to an unreachable `127.0.0.1` URL — paste that full callback URL back into the console → server completes exchange, saves `auths/lobsterai-<uid>.json`, adds to pool, queries credits
+- **Data display**: account stats (count / total credits / healthy), per-account detail (nickname, uid, credits, cooling/disabled state, token expiry), one-click credit refresh, model list
+- **API endpoints** (under `/console/api/`): `login/start`, `login/callback`, `accounts`, `refresh-credits`, `models`
+
+No external dependencies — pure Go stdlib + embedded HTML.
+
 ## Build
 
 ```bash
