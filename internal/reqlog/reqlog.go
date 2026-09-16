@@ -1,12 +1,20 @@
 // Package reqlog 请求日志：内存环形缓冲 + 持久化文件（JSONL），控制台展示用。
+// 文件按大小自动轮转：requests.jsonl → requests.jsonl.1 → … → requests.jsonl.<N>。
 package reqlog
 
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"os"
 	"sync"
 	"time"
+)
+
+// 默认轮转参数（可被 New 的参数覆盖）。
+const (
+	DefaultMaxBytes     = 10 << 20 // 10MB 单文件上限
+	DefaultMaxBackups   = 2        // 保留历史文件数
 )
 
 // Entry 单条请求日志。
@@ -25,31 +33,77 @@ type Entry struct {
 	Error     string    `json:"error,omitempty"`    // 上游错误摘要
 }
 
-// Logger 环形缓冲 + 文件追加。
+// Logger 环形缓冲 + 文件追加（带轮转）。
 type Logger struct {
-	mu      sync.Mutex
-	entries []*Entry
-	max     int
-	fp      *os.File
-	w       *bufio.Writer
+	mu        sync.Mutex
+	entries   []*Entry
+	max       int
+	fp        *os.File
+	w         *bufio.Writer
+	file      string
+	maxBytes  int64
+	maxBackup int
+	written   int64 // 当前文件已写字节
+	writeErr  error // 最近一次写错误（诊断用）
 }
 
-// New 构建日志器；file 非空则同时追加写入（JSONL）。
+// New 构建日志器；file 非空则追加写入并启用轮转。
 func New(file string, maxEntries int) *Logger {
+	return NewWithRotate(file, maxEntries, DefaultMaxBytes, DefaultMaxBackups)
+}
+
+// NewWithRotate 自定义轮转参数。
+func NewWithRotate(file string, maxEntries, maxBytes, maxBackups int) *Logger {
 	if maxEntries <= 0 {
 		maxEntries = 500
 	}
-	l := &Logger{max: maxEntries}
+	l := &Logger{max: maxEntries, file: file, maxBytes: int64(maxBytes), maxBackup: maxBackups}
 	if file != "" {
-		if f, err := os.OpenFile(file, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
-			l.fp = f
-			l.w = bufio.NewWriter(f)
-		}
+		l.open()
 	}
 	return l
 }
 
-// Log 追加一条（非阻塞语义：锁内快速完成）。
+// open 打开（或续写）日志文件，统计已有大小。
+func (l *Logger) open() {
+	if st, err := os.Stat(l.file); err == nil {
+		l.written = st.Size()
+	}
+	fp, err := os.OpenFile(l.file, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		l.writeErr = err
+		return
+	}
+	l.fp = fp
+	l.w = bufio.NewWriter(fp)
+	l.writeErr = nil
+}
+
+// rotate 关闭当前文件，滚动命名，重开新文件。调用方持锁。
+func (l *Logger) rotate() {
+	if l.w != nil {
+		l.w.Flush()
+	}
+	if l.fp != nil {
+		l.fp.Close()
+	}
+	// requests.jsonl.(N-1) → requests.jsonl.N … requests.jsonl → requests.jsonl.1
+	for i := l.maxBackup; i >= 1; i-- {
+		src := fmt.Sprintf("%s.%d", l.file, i)
+		if i == l.maxBackup {
+			os.Remove(src) // 最老的历史直接删除
+			continue
+		}
+		os.Rename(src, fmt.Sprintf("%s.%d", l.file, i+1))
+	}
+	if l.written > 0 {
+		os.Rename(l.file, l.file+".1")
+	}
+	l.written = 0
+	l.open()
+}
+
+// Log 追加一条（锁内快速完成；磁盘错误静默但记录在 writeErr）。
 func (l *Logger) Log(e *Entry) {
 	if e == nil {
 		return
@@ -61,12 +115,21 @@ func (l *Logger) Log(e *Entry) {
 		// 滑动窗口裁剪
 		l.entries = l.entries[len(l.entries)-l.max:]
 	}
-	if l.w != nil {
-		if raw, err := json.Marshal(e); err == nil {
-			l.w.Write(raw)
-			l.w.WriteByte('\n')
-			// 小缓冲：每条都 flush，防容器异常退出丢日志；量小可接受
-			l.w.Flush()
+	if l.w == nil {
+		return
+	}
+	if raw, err := json.Marshal(e); err == nil {
+		n, _ := l.w.Write(raw)
+		l.w.WriteByte('\n')
+		l.written += int64(n) + 1
+		// 每条 flush：防容器异常退出丢日志；量小可接受
+		if err := l.w.Flush(); err != nil {
+			l.writeErr = err
+			return
+		}
+		// 超限轮转（在 flush 之后，保证当前文件完整）
+		if l.written >= l.maxBytes {
+			l.rotate()
 		}
 	}
 }
@@ -84,6 +147,13 @@ func (l *Logger) Recent(n int) []*Entry {
 		out[i] = l.entries[len(l.entries)-1-i]
 	}
 	return out
+}
+
+// WriteErr 返回最近一次文件写错误（nil = 健康）。
+func (l *Logger) WriteErr() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.writeErr
 }
 
 // Close 关闭文件。

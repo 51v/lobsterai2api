@@ -386,7 +386,11 @@ func (c *Console) requestLogs(w http.ResponseWriter, r *http.Request) {
 			n = parsed
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"logs": c.cfg.ReqLog.Recent(n), "enabled": true})
+	resp := map[string]any{"logs": c.cfg.ReqLog.Recent(n), "enabled": true}
+	if err := c.cfg.ReqLog.WriteErr(); err != nil {
+		resp["write_error"] = err.Error()
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // accountDelete 删除账号：内存池 + 状态 + 凭据文件。
