@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LobsterAI2API 控制台</title>
+<style>
+:root{
+  --bg:#0f1115;--card:#171a21;--card2:#1d212b;--border:#2a2f3c;
+  --text:#e6e9f0;--muted:#8b93a7;--accent:#4f8cff;--accent2:#67d5a4;
+  --danger:#ff6b6b;--warn:#f0b429;--ok:#4cd97b;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font:14px/1.6 -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;padding:24px;max-width:1080px;margin:0 auto}
+h1{font-size:20px;margin-bottom:4px}
+.sub{color:var(--muted);font-size:13px;margin-bottom:20px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:18px;margin-bottom:18px}
+.card h2{font-size:15px;margin-bottom:12px;display:flex;align-items:center;gap:8px}
+button{background:var(--accent);color:#fff;border:none;border-radius:6px;padding:8px 16px;font-size:13px;cursor:pointer;transition:.15s}
+button:hover{filter:brightness(1.15)}
+button:disabled{opacity:.5;cursor:not-allowed}
+button.ghost{background:transparent;border:1px solid var(--border);color:var(--text)}
+button.danger{background:var(--danger)}
+input[type=text],textarea{width:100%;background:var(--card2);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:8px 10px;font:13px/1.5 ui-monospace,Consolas,monospace}
+textarea{resize:vertical;min-height:64px}
+label{font-size:13px;color:var(--muted);display:block;margin:10px 0 4px}
+.muted{color:var(--muted);font-size:12px}
+.mono{font-family:ui-monospace,Consolas,monospace}
+a{color:var(--accent);word-break:break-all}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--border)}
+th{color:var(--muted);font-weight:500;font-size:12px}
+.badge{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:500}
+.badge.ok{background:rgba(76,217,123,.15);color:var(--ok)}
+.badge.cooling{background:rgba(240,180,41,.15);color:var(--warn)}
+.badge.disabled{background:rgba(255,107,107,.15);color:var(--danger)}
+.badge.gray{background:rgba(139,147,167,.15);color:var(--muted)}
+.step{display:flex;gap:10px;margin-top:12px}
+.step .n{flex:none;width:22px;height:22px;border-radius:50%;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700}
+.step .body{flex:1}
+#loginUrlBox{margin:8px 0;padding:10px;background:var(--card2);border-radius:6px;display:none}
+#loginUrlBox a{font-size:12px}
+.msg{margin-top:10px;padding:10px 12px;border-radius:6px;font-size:13px;display:none}
+.msg.ok{background:rgba(76,217,123,.12);color:var(--ok);display:block}
+.msg.err{background:rgba(255,107,107,.12);color:var(--danger);display:block}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:18px}
+.stat{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px}
+.stat .v{font-size:22px;font-weight:700}
+.stat .k{font-size:12px;color:var(--muted)}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chip{background:var(--card2);border:1px solid var(--border);border-radius:12px;padding:2px 10px;font-size:12px;font-family:ui-monospace,Consolas,monospace}
+.row-actions{display:flex;gap:8px;flex-wrap:wrap}
+</style>
+</head>
+<body>
+<h1>🦞 LobsterAI2API 控制台</h1>
+<div class="sub">账号池管理 · 授权回填 · 数据展示</div>
+
+<div class="stats" id="stats"></div>
+
+<div class="card">
+  <h2>👤 账号池 <button class="ghost" style="margin-left:auto" onclick="refreshAccounts()">刷新</button>
+  <button class="ghost" onclick="refreshCredits()">刷新积分</button></h2>
+  <div style="overflow-x:auto">
+  <table>
+    <thead><tr><th>昵称</th><th>UID</th><th>积分</th><th>状态</th><th>说明</th><th>令牌到期</th></tr></thead>
+    <tbody id="accRows"><tr><td colspan="6" class="muted">加载中…</td></tr></tbody>
+  </table>
+  </div>
+</div>
+
+<div class="card">
+  <h2>➕ 添加账号（授权回填）</h2>
+  <div class="step">
+    <div class="n">1</div>
+    <div class="body">
+      <b>开始授权</b>
+      <div class="muted">生成一次新的登录授权（有效期 15 分钟）</div>
+      <div style="margin-top:8px"><button id="btnStart" onclick="startLogin()">开始授权</button></div>
+    </div>
+  </div>
+  <div id="loginUrlBox">
+    <div class="step">
+      <div class="n">2</div>
+      <div class="body">
+        <b>浏览器打开下面的链接登录</b>
+        <div class="muted">建议用无痕窗口；登录后页面会跳到一个打不开的 127.0.0.1 地址——这是正常的，进行第 3 步</div>
+        <div style="margin:8px 0"><a id="loginUrl" href="#" target="_blank"></a></div>
+        <button class="ghost" onclick="copyLoginUrl()">复制链接</button>
+      </div>
+    </div>
+    <div class="step" style="margin-top:14px">
+      <div class="n">3</div>
+      <div class="body">
+        <b>回填回调地址</b>
+        <div class="muted">把浏览器地址栏里跳转后的完整 URL（形如 http://127.0.0.1:xxxxx/auth/callback?code=…&state=…）粘贴到这里</div>
+        <textarea id="cbUrl" placeholder="http://127.0.0.1:xxxxx/auth/callback?code=...&state=..." style="margin-top:8px"></textarea>
+        <div style="margin-top:8px"><button id="btnSubmit" onclick="submitCallback()">提交并添加账号</button></div>
+      </div>
+    </div>
+  </div>
+  <div class="msg" id="loginMsg"></div>
+</div>
+
+<div class="card">
+  <h2>🤖 可用模型 <button class="ghost" style="margin-left:auto" onclick="loadModels()">刷新</button></h2>
+  <div class="chips" id="modelChips"><span class="muted">加载中…</span></div>
+</div>
+
+<div class="card">
+  <h2>🔌 接入信息</h2>
+  <div class="mono" style="font-size:13px">
+    <div>API 地址：<span id="apiBase"></span></div>
+    <div>API Key：<span id="apiKey"></span></div>
+    <div class="muted" style="margin-top:4px">兼容 OpenAI SDK：base_url 填上面的地址，api_key 填上面的 key</div>
+  </div>
+</div>
+
+<script>
+const KEY = new URLSearchParams(location.search).get('key') || '';
+const H = {'Content-Type':'application/json'};
+if (KEY) H['Authorization'] = 'Bearer ' + KEY;
+
+function esc(s){const d=document.createElement('div');d.textContent=s??'';return d.innerHTML}
+function showMsg(id, text, ok){
+  const el=document.getElementById(id);
+  el.className='msg '+(ok?'ok':'err');
+  el.textContent=text;
+  setTimeout(()=>{el.className='msg'}, ok?6000:12000);
+}
+
+async function api(path, opts={}){
+  const r = await fetch(path, {headers:H, ...opts});
+  const d = await r.json().catch(()=>({error:'响应解析失败'}));
+  if(!r.ok) throw new Error(d.error || ('HTTP '+r.status));
+  return d;
+}
+
+function renderStats(accounts){
+  const total=accounts.length;
+  const credits=accounts.reduce((s,a)=>s+(a.credits||0),0);
+  const healthy=accounts.filter(a=>!a.disabled&&!a.cooling).length;
+  document.getElementById('stats').innerHTML = `
+    <div class="stat"><div class="v">${total}</div><div class="k">账号数</div></div>
+    <div class="stat"><div class="v">${credits}</div><div class="k">总积分</div></div>
+    <div class="stat"><div class="v">${healthy}</div><div class="k">可用账号</div></div>`;
+}
+
+async function refreshAccounts(){
+  try{
+    const d = await api('/console/api/accounts');
+    const rows = d.accounts.map(a=>{
+      let badge;
+      if(a.disabled) badge='<span class="badge disabled">已禁用</span>';
+      else if(a.cooling) badge='<span class="badge cooling">冷却中</span>';
+      else badge='<span class="badge ok">可用</span>';
+      const reason=a.reason?esc(a.reason):'—';
+      const exp=a.expires_human?esc(a.expires_human):'—';
+      return `<tr><td>${esc(a.nickname||'—')}</td><td class="mono">${esc(a.uid)}</td><td><b>${a.credits??0}</b></td><td>${badge}</td><td class="muted">${reason}</td><td class="muted">${exp}</td></tr>`;
+    }).join('');
+    document.getElementById('accRows').innerHTML = rows || '<tr><td colspan="6" class="muted">还没有账号，用下面“添加账号”加一个</td></tr>';
+    renderStats(d.accounts);
+  }catch(e){
+    document.getElementById('accRows').innerHTML=`<tr><td colspan="6" style="color:var(--danger)">${esc(e.message)}</td></tr>`;
+  }
+}
+
+async function refreshCredits(){
+  try{
+    const d = await api('/console/api/refresh-credits',{method:'POST'});
+    const parts = d.results.map(r=>`${r.uid}: ${r.credits!=null?r.credits+' 分':'失败 '+r.error}`);
+    showMsg('loginMsg','积分刷新：'+parts.join('；'),true);
+    refreshAccounts();
+  }catch(e){ showMsg('loginMsg','刷新失败：'+e.message,false) }
+}
+
+let currentState='';
+
+async function startLogin(){
+  const btn=document.getElementById('btnStart');
+  btn.disabled=true; btn.textContent='生成中…';
+  try{
+    const d = await api('/console/api/login/start',{method:'POST'});
+    currentState=d.state;
+    document.getElementById('loginUrlBox').style.display='block';
+    const a=document.getElementById('loginUrl');
+    a.href=d.login_url; a.textContent=d.login_url;
+    document.getElementById('cbUrl').value='';
+    showMsg('loginMsg','授权已生成，15 分钟内有效',true);
+  }catch(e){ showMsg('loginMsg','生成失败：'+e.message,false) }
+  finally{ btn.disabled=false; btn.textContent='开始授权' }
+}
+
+function copyLoginUrl(){
+  const t=document.getElementById('loginUrl').href;
+  navigator.clipboard.writeText(t).then(()=>showMsg('loginMsg','已复制',true));
+}
+
+async function submitCallback(){
+  const url=document.getElementById('cbUrl').value.trim();
+  if(!url){ showMsg('loginMsg','先粘贴回调 URL',false); return }
+  const btn=document.getElementById('btnSubmit');
+  btn.disabled=true; btn.textContent='提交中…';
+  try{
+    const d = await api('/console/api/login/callback',{method:'POST',body:JSON.stringify({url})});
+    showMsg('loginMsg',`✅ 添加成功：${d.nickname||d.uid}（积分 ${d.credits}），已入池`,true);
+    document.getElementById('cbUrl').value='';
+    document.getElementById('loginUrlBox').style.display='none';
+    refreshAccounts();
+  }catch(e){ showMsg('loginMsg','添加失败：'+e.message,false) }
+  finally{ btn.disabled=false; btn.textContent='提交并添加账号' }
+}
+
+async function loadModels(){
+  try{
+    const d = await api('/console/api/models');
+    const chips=(d.models||[]).map(m=>`<span class="chip">${esc(m)}</span>`).join('');
+    document.getElementById('modelChips').innerHTML = chips || '<span class="muted">暂无（需要至少一个可用账号）</span>';
+  }catch(e){
+    document.getElementById('modelChips').innerHTML=`<span style="color:var(--danger)">${esc(e.message)}</span>`;
+  }
+}
+
+// 接入信息
+document.getElementById('apiBase').textContent = location.origin + '/v1';
+document.getElementById('apiKey').textContent = KEY ? KEY : '（未配置）';
+
+refreshAccounts();
+loadModels();
+setInterval(refreshAccounts, 15000);
+</script>
+</body>
+</html>

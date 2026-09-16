@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"lobsterai2api/internal/auth"
+	"lobsterai2api/internal/console"
 	"lobsterai2api/internal/pool"
 	"lobsterai2api/internal/scheduler"
 	"lobsterai2api/internal/server"
@@ -65,6 +66,26 @@ func main() {
 		ErrCooldown:  cfg.ErrCooldownDur,
 	})
 
+	// 内置 Web 控制台（/console）：添加账号 + 数据展示
+	portal := os.Getenv("LB2A_LOGIN_PORTAL")
+	if portal == "" {
+		portal = "https://lobsterai.youdao.com"
+	}
+	con, err := console.New(console.Config{
+		Pool:      p,
+		Upstream:  up,
+		APIKey:    cfg.APIKey,
+		AuthDir:   cfg.AuthDir,
+		PortalURL: portal,
+	})
+	if err != nil {
+		log.Fatalf("console: %v", err)
+	}
+	root := http.NewServeMux()
+	root.Handle("/console", con)
+	root.Handle("/console/", con)
+	root.Handle("/", h)
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go sch.Run(ctx)
@@ -76,7 +97,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,
-		Handler:           h,
+		Handler:           root,
 		ReadHeaderTimeout: 30 * time.Second,
 	}
 	go func() {
