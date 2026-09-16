@@ -395,6 +395,10 @@ func (c *Console) accountDelete(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if c.cfg.Pool.AuthByUID(uid) == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "账号不存在"})
+		return
+	}
 	a := c.cfg.Pool.AuthByUID(uid)
 	c.cfg.Pool.Remove(uid)
 	deleted := false
