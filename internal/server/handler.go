@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"lobsterai2api/internal/pool"
+	"lobsterai2api/internal/reqlog"
 	"lobsterai2api/internal/upstream"
 )
 
@@ -18,13 +19,14 @@ import (
 type Config struct {
 	Pool         *pool.Pool
 	Upstream     *upstream.Client
-	APIKey       string        // 空 = 不鉴权
-	MaxRotate    int           // 单请求最多换号次数，默认 3
-	HardCooldown time.Duration // 余额不足冷却，默认 12h
-	SoftCooldown time.Duration // 429 冷却，默认 60s
-	ErrThreshold int           // 连续其他错误冷却阈值，默认 3
-	ErrCooldown  time.Duration // 错误冷却时长，默认 10m
-	RefreshSkew  time.Duration // token 提前刷新窗口，默认 10m
+	APIKey       string          // 空 = 不鉴权
+	MaxRotate    int             // 单请求最多换号次数，默认 3
+	HardCooldown time.Duration   // 余额不足冷却，默认 12h
+	SoftCooldown time.Duration   // 429 冷却，默认 60s
+	ErrThreshold int             // 连续其他错误冷却阈值，默认 3
+	ErrCooldown  time.Duration   // 错误冷却时长，默认 10m
+	RefreshSkew  time.Duration   // token 提前刷新窗口，默认 10m
+	ReqLog       *reqlog.Logger  // 请求日志（可空 = 不记录）
 }
 
 // Handler 主路由。
@@ -175,15 +177,23 @@ func (h *Handler) fetchDynamicModels() []string {
 }
 
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
 	body, err := io.ReadAll(io.LimitReader(r.Body, 8<<20))
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "read body: "+err.Error())
 		return
 	}
 	var peek struct {
-		Stream bool `json:"stream"`
+		Stream bool   `json:"stream"`
+		Model  string `json:"model"`
 	}
 	_ = json.Unmarshal(body, &peek)
+
+	// 响应记录（日志用）
+	lw := &loggedWriter{ResponseWriter: w}
+
+	var lastUID string
+	var respTokens int
 
 	tried := map[string]bool{}
 	var lastErr error
@@ -193,6 +203,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		tried[acct.UID] = true
+		lastUID = acct.UID
 
 		// token 临近过期 → 先 refresh（失败冷却换号）
 		if acct.NeedsRefresh(h.cfg.RefreshSkew) {
@@ -245,22 +256,100 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		defer rc.Close()
 		h.cfg.Pool.NoteSuccess(acct.UID)
 		if peek.Stream {
-			_ = upstream.Stream(w, rc)
+			_ = upstream.Stream(lw, rc)
+			h.logRequest(r, peek.Model, lastUID, lw.status, start, peek.Stream, 0, upstream.ErrNone, "")
 			return
 		}
 		resp, err := upstream.Aggregate(rc)
 		if err != nil {
-			writeOpenAIError(w, http.StatusBadGateway, "upstream_parse", err.Error())
+			writeOpenAIError(lw, http.StatusBadGateway, "upstream_parse", err.Error())
+			h.logRequest(r, peek.Model, lastUID, lw.status, start, peek.Stream, 0, upstream.ErrClient, err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, resp)
+		if usage, ok := resp["usage"].(map[string]any); ok {
+			if tv, ok := usage["total_tokens"].(float64); ok {
+				respTokens = int(tv)
+			}
+		}
+		writeJSON(lw, http.StatusOK, resp)
+		h.logRequest(r, peek.Model, lastUID, lw.status, start, peek.Stream, respTokens, upstream.ErrNone, "")
 		return
 	}
 	msg := "all accounts unavailable (cooling/disabled)"
+	kind := upstream.ErrNone
 	if lastErr != nil {
 		msg += ": " + lastErr.Error()
+		if ue, ok := lastErr.(*upstream.Error); ok {
+			kind = ue.Kind
+		}
 	}
-	writeOpenAIError(w, http.StatusServiceUnavailable, "no_healthy_account", msg)
+	writeOpenAIError(lw, http.StatusServiceUnavailable, "no_healthy_account", msg)
+	h.logRequest(r, peek.Model, lastUID, lw.status, start, peek.Stream, 0, kind, msg)
+}
+
+// loggedWriter 捕获写给客户端的状态码。
+type loggedWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (l *loggedWriter) WriteHeader(code int) {
+	l.status = code
+	l.ResponseWriter.WriteHeader(code)
+}
+
+func (l *loggedWriter) Flush() {
+	if f, ok := l.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// logRequest 记录一条请求日志。
+func (h *Handler) logRequest(r *http.Request, model, uid string, status int, start time.Time, stream bool, tokens int, kind upstream.ErrKind, errMsg string) {
+	if h.cfg.ReqLog == nil {
+		return
+	}
+	errStr := ""
+	if kind != upstream.ErrNone {
+		errStr = kind.String()
+	}
+	if errMsg != "" {
+		if errStr != "" {
+			errStr += ": "
+		}
+		// 截断，避免日志爆炸
+		if len(errMsg) > 160 {
+			errMsg = errMsg[:160]
+		}
+		errStr += errMsg
+	}
+	h.cfg.ReqLog.Log(&reqlog.Entry{
+		Time:    start,
+		Method:  r.Method,
+		Path:    r.URL.Path,
+		Model:   model,
+		UID:     uid,
+		Status:  status,
+		Duration: float64(time.Since(start).Microseconds()) / 1000.0,
+		Stream:  stream,
+		RespTokens: tokens,
+		ClientIP: clientIP(r),
+		Error:   errStr,
+	})
+}
+
+func clientIP(r *http.Request) string {
+	// 反代场景优先 X-Forwarded-For 第一段
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		if i := strings.Index(xff, ","); i > 0 {
+			return xff[:i]
+		}
+		return xff
+	}
+	if i := strings.LastIndex(r.RemoteAddr, ":"); i > 0 {
+		return r.RemoteAddr[:i]
+	}
+	return r.RemoteAddr
 }
 
 // ---------------------------------------------------------------------------

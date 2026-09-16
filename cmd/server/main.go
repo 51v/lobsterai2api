@@ -8,12 +8,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"lobsterai2api/internal/auth"
 	"lobsterai2api/internal/console"
 	"lobsterai2api/internal/pool"
+	"lobsterai2api/internal/reqlog"
 	"lobsterai2api/internal/scheduler"
 	"lobsterai2api/internal/server"
 	"lobsterai2api/internal/upstream"
@@ -49,6 +51,10 @@ func main() {
 	up := upstream.New()
 	up.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 
+	// 请求日志：内存环形缓冲（500 条）+ data/requests.jsonl 持久化
+	reqLogFile := filepath.Join(cfg.AuthDir, "..", "data", "requests.jsonl")
+	rl := reqlog.New(reqLogFile, 500)
+
 	sch := scheduler.New(scheduler.Config{
 		Pool:           p,
 		Upstream:       up,
@@ -64,6 +70,7 @@ func main() {
 		SoftCooldown: cfg.SoftRateDur,
 		ErrThreshold: cfg.Cooldown.ErrThresh,
 		ErrCooldown:  cfg.ErrCooldownDur,
+		ReqLog:       rl,
 	})
 
 	// 内置 Web 控制台（/console）：添加账号 + 数据展示
@@ -77,6 +84,7 @@ func main() {
 		APIKey:    cfg.APIKey,
 		AuthDir:   cfg.AuthDir,
 		PortalURL: portal,
+		ReqLog:    rl,
 	})
 	if err != nil {
 		log.Fatalf("console: %v", err)

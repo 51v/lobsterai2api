@@ -232,6 +232,53 @@ func (p *Pool) AuthByUID(uid string) *auth.Auth {
 	return nil
 }
 
+// Remove 移除账号（内存池 + 状态文件）；不删凭据文件（调用方决定）。
+func (p *Pool) Remove(uid string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.byUID, uid)
+	p.saveLocked()
+}
+
+// SetAuth 替换账号凭证（更新 token 后用）。
+func (p *Pool) SetAuth(a *auth.Auth) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if e, ok := p.byUID[a.UID]; ok {
+		e.a = a
+	}
+}
+
+// ClearCooldown 立即解除冷却（保留禁用状态）。
+func (p *Pool) ClearCooldown(uid string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if e, ok := p.byUID[uid]; ok {
+		e.until = time.Time{}
+		e.reason = ""
+		e.errCount = 0
+	}
+	p.saveLocked()
+}
+
+// Reenable 解除禁用（重登后人工恢复）。
+func (p *Pool) Reenable(uid string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if e, ok := p.byUID[uid]; ok {
+		e.disabled = false
+		e.until = time.Time{}
+		e.reason = ""
+		e.errCount = 0
+	}
+	p.saveLocked()
+}
+
+// DisableUID 禁用账号（控制台操作）。
+func (p *Pool) DisableUID(uid, reason string) {
+	p.Disable(uid, reason)
+}
+
 // List 返回所有账号状态（按 UID 排序，稳定输出）。
 func (p *Pool) List() []Status {
 	p.mu.RLock()

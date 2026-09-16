@@ -15,12 +15,14 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"lobsterai2api/internal/auth"
 	"lobsterai2api/internal/pool"
+	"lobsterai2api/internal/reqlog"
 	"lobsterai2api/internal/upstream"
 )
 
@@ -33,6 +35,7 @@ type Config struct {
 	APIKey    string // 与主 API 相同的鉴权 key
 	AuthDir   string // auths 目录
 	PortalURL string // 登录门户，如 https://lobsterai.youdao.com
+	ReqLog    *reqlog.Logger // 请求日志（可空）
 }
 
 // pendingLogin 一次进行中的授权。
@@ -86,6 +89,21 @@ func (c *Console) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	case p == "/api/models" && r.Method == http.MethodGet:
 		c.auth(c.models)(w, r)
+
+	case p == "/api/logs" && r.Method == http.MethodGet:
+		c.auth(c.requestLogs)(w, r)
+
+	case p == "/api/account/delete" && r.Method == http.MethodPost:
+		c.auth(c.accountDelete)(w, r)
+
+	case p == "/api/account/refresh-token" && r.Method == http.MethodPost:
+		c.auth(c.accountRefreshToken)(w, r)
+
+	case p == "/api/account/enable" && r.Method == http.MethodPost:
+		c.auth(c.accountEnable)(w, r)
+
+	case p == "/api/account/disable" && r.Method == http.MethodPost:
+		c.auth(c.accountDisable)(w, r)
 
 	default:
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "not found"})
@@ -354,6 +372,109 @@ func (c *Console) models(w http.ResponseWriter, r *http.Request) {
 		ids = nil
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"models": ids})
+}
+
+// requestLogs 最近请求日志。
+func (c *Console) requestLogs(w http.ResponseWriter, r *http.Request) {
+	if c.cfg.ReqLog == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"logs": []*reqlog.Entry{}, "enabled": false})
+		return
+	}
+	n := 100
+	if v := r.URL.Query().Get("n"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 && parsed <= 500 {
+			n = parsed
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"logs": c.cfg.ReqLog.Recent(n), "enabled": true})
+}
+
+// accountDelete 删除账号：内存池 + 状态 + 凭据文件。
+func (c *Console) accountDelete(w http.ResponseWriter, r *http.Request) {
+	uid, ok := c.readUID(w, r)
+	if !ok {
+		return
+	}
+	a := c.cfg.Pool.AuthByUID(uid)
+	c.cfg.Pool.Remove(uid)
+	deleted := false
+	if a != nil && a.FilePath != "" {
+		if err := os.Remove(a.FilePath); err == nil {
+			deleted = true
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "uid": uid, "file_deleted": deleted})
+}
+
+// accountRefreshToken 手动刷新某账号 token（继承 upstream.RefreshToken + 落盘）。
+func (c *Console) accountRefreshToken(w http.ResponseWriter, r *http.Request) {
+	uid, ok := c.readUID(w, r)
+	if !ok {
+		return
+	}
+	a := c.cfg.Pool.AuthByUID(uid)
+	if a == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "账号不存在"})
+		return
+	}
+	if strings.TrimSpace(a.RefreshToken) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "无 refreshToken，需重新授权"})
+		return
+	}
+	if err := c.cfg.Upstream.RefreshToken(a); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": truncate(err.Error(), 160)})
+		return
+	}
+	if err := a.SaveAtomic(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "刷新成功但落盘失败: " + err.Error()})
+		return
+	}
+	expires := ""
+	if a.ExpiresAt > 0 {
+		expires = time.Unix(a.ExpiresAt, 0).Format("2006-01-02 15:04:05")
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "uid": uid, "expires": expires})
+}
+
+// accountEnable 启用/解冻账号。
+func (c *Console) accountEnable(w http.ResponseWriter, r *http.Request) {
+	uid, ok := c.readUID(w, r)
+	if !ok {
+		return
+	}
+	if c.cfg.Pool.AuthByUID(uid) == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "账号不存在"})
+		return
+	}
+	c.cfg.Pool.Reenable(uid)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "uid": uid})
+}
+
+// accountDisable 禁用账号（暂停使用，不删数据）。
+func (c *Console) accountDisable(w http.ResponseWriter, r *http.Request) {
+	uid, ok := c.readUID(w, r)
+	if !ok {
+		return
+	}
+	if c.cfg.Pool.AuthByUID(uid) == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "账号不存在"})
+		return
+	}
+	c.cfg.Pool.DisableUID(uid, "手动禁用")
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "uid": uid})
+}
+
+// readUID 从 JSON body 读 uid。
+func (c *Console) readUID(w http.ResponseWriter, r *http.Request) (string, bool) {
+	var req struct {
+		UID string `json:"uid"`
+	}
+	body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err := json.Unmarshal(body, &req); err != nil || strings.TrimSpace(req.UID) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "missing uid"})
+		return "", false
+	}
+	return strings.TrimSpace(req.UID), true
 }
 
 // ---------------------------------------------------------------------------

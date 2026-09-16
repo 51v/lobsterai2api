@@ -63,10 +63,21 @@ th{color:var(--muted);font-weight:500;font-size:12px}
   <button class="ghost" onclick="refreshCredits()">刷新积分</button></h2>
   <div style="overflow-x:auto">
   <table>
-    <thead><tr><th>昵称</th><th>UID</th><th>积分</th><th>状态</th><th>说明</th><th>令牌到期</th></tr></thead>
-    <tbody id="accRows"><tr><td colspan="6" class="muted">加载中…</td></tr></tbody>
+    <thead><tr><th>昵称</th><th>UID</th><th>积分</th><th>状态</th><th>说明</th><th>令牌到期</th><th>操作</th></tr></thead>
+    <tbody id="accRows"><tr><td colspan="7" class="muted">加载中…</td></tr></tbody>
   </table>
   </div>
+</div>
+
+<div class="card">
+  <h2>📜 请求日志 <button class="ghost" style="margin-left:auto" onclick="loadLogs()">刷新</button></h2>
+  <div style="overflow-x:auto; max-height:400px; overflow-y:auto">
+  <table>
+    <thead><tr><th>时间</th><th>模型</th><th>账号</th><th>状态</th><th>耗时</th><th>Tokens</th><th>来源IP</th><th>错误</th></tr></thead>
+    <tbody id="logRows"><tr><td colspan="8" class="muted">加载中…</td></tr></tbody>
+  </table>
+  </div>
+  <div class="muted" id="logHint" style="margin-top:6px"></div>
 </div>
 
 <div class="card">
@@ -156,12 +167,59 @@ async function refreshAccounts(){
       else badge='<span class="badge ok">可用</span>';
       const reason=a.reason?esc(a.reason):'—';
       const exp=a.expires_human?esc(a.expires_human):'—';
-      return `<tr><td>${esc(a.nickname||'—')}</td><td class="mono">${esc(a.uid)}</td><td><b>${a.credits??0}</b></td><td>${badge}</td><td class="muted">${reason}</td><td class="muted">${exp}</td></tr>`;
+      const uid=esc(a.uid);
+      let actions='';
+      if(a.disabled) actions=`<button class="ghost" onclick="acctAction('enable','${uid}')">启用</button>`;
+      else actions=`<button class="ghost" onclick="acctAction('disable','${uid}')">禁用</button>`;
+      actions+=` <button class="ghost" onclick="acctAction('refresh-token','${uid}')">刷新Token</button>`;
+      actions+=` <button class="danger" onclick="acctDelete('${uid}')">删除</button>`;
+      return `<tr><td>${esc(a.nickname||'—')}</td><td class="mono">${uid}</td><td><b>${a.credits??0}</b></td><td>${badge}</td><td class="muted">${reason}</td><td class="muted">${exp}</td><td class="row-actions">${actions}</td></tr>`;
     }).join('');
-    document.getElementById('accRows').innerHTML = rows || '<tr><td colspan="6" class="muted">还没有账号，用下面“添加账号”加一个</td></tr>';
+    document.getElementById('accRows').innerHTML = rows || '<tr><td colspan="7" class="muted">还没有账号，用下面“添加账号”加一个</td></tr>';
     renderStats(d.accounts);
   }catch(e){
-    document.getElementById('accRows').innerHTML=`<tr><td colspan="6" style="color:var(--danger)">${esc(e.message)}</td></tr>`;
+    document.getElementById('accRows').innerHTML=`<tr><td colspan="7" style="color:var(--danger)">${esc(e.message)}</td></tr>`;
+  }
+}
+
+async function acctAction(action, uid){
+  if(!confirm(`确认对账号 ${uid} 执行 ${action} ？`)) return;
+  try{
+    const d = await api('/console/api/account/'+action, {method:'POST', body:JSON.stringify({uid})});
+    let extra = d.expires ? `，新到期时间 ${d.expires}` : '';
+    showMsg('loginMsg', `✅ ${action} 成功${extra}`, true);
+    refreshAccounts();
+  }catch(e){ showMsg('loginMsg', `${action} 失败：`+e.message, false) }
+}
+
+async function acctDelete(uid){
+  if(!confirm(`确认删除账号 ${uid}？凭据文件会一并删除，不可恢复！`)) return;
+  try{
+    await api('/console/api/account/delete', {method:'POST', body:JSON.stringify({uid})});
+    showMsg('loginMsg', `✅ 账号 ${uid} 已删除`, true);
+    refreshAccounts();
+  }catch(e){ showMsg('loginMsg', '删除失败：'+e.message, false) }
+}
+
+async function loadLogs(){
+  try{
+    const d = await api('/console/api/logs?n=100');
+    if(!d.enabled){
+      document.getElementById('logRows').innerHTML='<tr><td colspan="8" class="muted">请求日志未启用</td></tr>';
+      return;
+    }
+    const logs = d.logs || [];
+    const rows = logs.map(l=>{
+      const t = l.time ? new Date(l.time).toLocaleString('zh-CN', {hour12:false}) : '';
+      const statusColor = l.status>=400 ? 'var(--danger)' : 'var(--ok)';
+      const dur = l.duration_ms!=null ? (l.duration_ms>=1000 ? (l.duration_ms/1000).toFixed(1)+'s' : Math.round(l.duration_ms)+'ms') : '';
+      const stream = l.stream ? ' ⚡' : '';
+      return `<tr><td class="muted">${esc(t)}</td><td class="mono">${esc(l.model||'—')}${stream}</td><td class="mono">${esc(l.uid||'—')}</td><td style="color:${statusColor}">${l.status||''}</td><td class="muted">${dur}</td><td class="muted">${l.resp_tokens||''}</td><td class="muted">${esc(l.client_ip||'')}</td><td class="muted" style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(l.error||'')}">${esc(l.error||'')}</td></tr>`;
+    }).join('');
+    document.getElementById('logRows').innerHTML = rows || '<tr><td colspan="8" class="muted">暂无请求记录</td></tr>';
+    document.getElementById('logHint').textContent = `最近 ${logs.length} 条（新→旧）`;
+  }catch(e){
+    document.getElementById('logRows').innerHTML=`<tr><td colspan="8" style="color:var(--danger)">${esc(e.message)}</td></tr>`;
   }
 }
 
@@ -227,7 +285,9 @@ document.getElementById('apiKey').textContent = KEY ? KEY : '（未配置）';
 
 refreshAccounts();
 loadModels();
+loadLogs();
 setInterval(refreshAccounts, 15000);
+setInterval(loadLogs, 15000);
 </script>
 </body>
 </html>
