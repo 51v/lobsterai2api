@@ -47,15 +47,17 @@ type pendingLogin struct {
 
 // Console 管理台 HTTP handler。
 type Console struct {
-	cfg     Config
-	mu      sync.Mutex
-	pending map[string]*pendingLogin // state → login
-	index   []byte
+	cfg         Config
+	mu          sync.Mutex
+	pending     map[string]*pendingLogin // state → login
+	index       []byte
+	lastCheckin   map[string]time.Time // uid → 最后签到时间（控制台手动触发）
+	lastCheckinMu sync.Mutex
 }
 
 // New 构建控制台。
 func New(cfg Config) (*Console, error) {
-	c := &Console{cfg: cfg, pending: map[string]*pendingLogin{}}
+	c := &Console{cfg: cfg, pending: map[string]*pendingLogin{}, lastCheckin: map[string]time.Time{}}
 	raw, err := indexHTML()
 	if err != nil {
 		return nil, err
@@ -104,6 +106,9 @@ func (c *Console) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	case p == "/api/account/disable" && r.Method == http.MethodPost:
 		c.auth(c.accountDisable)(w, r)
+
+	case p == "/api/checkin" && r.Method == http.MethodPost:
+		c.auth(c.checkin)(w, r)
 
 	default:
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "not found"})
@@ -314,7 +319,8 @@ func (c *Console) exchange(code string, pl *pendingLogin) (*auth.Auth, error) {
 type accountView struct {
 	pool.Status
 	TokenExpiresAt int64  `json:"token_expires_at"`
-	ExpiresHuman    string `json:"expires_human"`
+	ExpiresHuman   string `json:"expires_human"`
+	LastCheckin    string `json:"last_checkin,omitempty"` // 最后签到时间
 }
 
 // accounts 账号列表。
@@ -329,6 +335,11 @@ func (c *Console) accounts(w http.ResponseWriter, r *http.Request) {
 				v.ExpiresHuman = time.Unix(a.ExpiresAt, 0).Format("2006-01-02 15:04")
 			}
 		}
+		c.lastCheckinMu.Lock()
+		if t, ok := c.lastCheckin[s.UID]; ok {
+			v.LastCheckin = t.Format("2006-01-02 15:04")
+		}
+		c.lastCheckinMu.Unlock()
 		out = append(out, v)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"accounts": out})
@@ -358,6 +369,43 @@ func (c *Console) refreshCredits(w http.ResponseWriter, r *http.Request) {
 		results = append(results, result{UID: s.UID, Credits: &remain})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"results": results})
+}
+
+// checkin 手动触发所有账号签到 + 余额刷新 + 解冻。
+// 返回每个账号的执行结果，并在内存中记录签到时间。
+func (c *Console) checkin(w http.ResponseWriter, r *http.Request) {
+	list := c.cfg.Pool.List()
+	type result struct {
+		UID     string `json:"uid"`
+		Credits *int64 `json:"credits,omitempty"`
+		Error   string `json:"error,omitempty"`
+	}
+	results := make([]result, 0, len(list))
+	now := time.Now()
+	for _, st := range list {
+		if st.Disabled {
+			continue
+		}
+		a := c.cfg.Pool.AuthByUID(st.UID)
+		if a == nil || a.RefreshToken == "" {
+			results = append(results, result{UID: st.UID, Error: "no auth/refresh token"})
+			continue
+		}
+		if err := c.cfg.Upstream.DailyCheckin(a); err != nil {
+			// 已签到等业务错误也继续走余额查询
+		}
+		remain, _, err := c.cfg.Upstream.QuotaUsage(a)
+		if err != nil {
+			results = append(results, result{UID: st.UID, Error: truncate(err.Error(), 120)})
+			continue
+		}
+		c.cfg.Pool.ReenableIfCredits(st.UID, remain)
+		c.lastCheckinMu.Lock()
+		c.lastCheckin[st.UID] = now
+		c.lastCheckinMu.Unlock()
+		results = append(results, result{UID: st.UID, Credits: &remain})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"results": results, "checkin_time": now.Format("2006-01-02 15:04:05")})
 }
 
 // models 模型列表（转发主 handler 同款逻辑，直接用 upstream）。

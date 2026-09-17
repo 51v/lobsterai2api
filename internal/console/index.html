@@ -60,11 +60,12 @@ th{color:var(--muted);font-weight:500;font-size:12px}
 
 <div class="card">
   <h2>👤 账号池 <button class="ghost" style="margin-left:auto" onclick="refreshAccounts()">刷新</button>
-  <button class="ghost" onclick="refreshCredits()">刷新积分</button></h2>
+  <button class="ghost" onclick="refreshCredits()">刷新积分</button>
+  <button class="ghost" onclick="doCheckin()" id="btnCheckin">签到</button></h2>
   <div style="overflow-x:auto">
   <table>
-    <thead><tr><th>昵称</th><th>UID</th><th>积分</th><th>状态</th><th>说明</th><th>令牌到期</th><th>操作</th></tr></thead>
-    <tbody id="accRows"><tr><td colspan="7" class="muted">加载中…</td></tr></tbody>
+    <thead><tr><th>昵称</th><th>UID</th><th>积分</th><th>状态</th><th>说明</th><th>令牌到期</th><th>最后签到</th><th>操作</th></tr></thead>
+    <tbody id="accRows"><tr><td colspan="8" class="muted">加载中…</td></tr></tbody>
   </table>
   </div>
 </div>
@@ -167,15 +168,16 @@ async function refreshAccounts(){
       else badge='<span class="badge ok">可用</span>';
       const reason=a.reason?esc(a.reason):'—';
       const exp=a.expires_human?esc(a.expires_human):'—';
+      const lastc=a.last_checkin?esc(a.last_checkin):'—';
       const uid=esc(a.uid);
       let actions='';
       if(a.disabled) actions=`<button class="ghost" onclick="acctAction('enable','${uid}')">启用</button>`;
       else actions=`<button class="ghost" onclick="acctAction('disable','${uid}')">禁用</button>`;
       actions+=` <button class="ghost" onclick="acctAction('refresh-token','${uid}')">刷新Token</button>`;
       actions+=` <button class="danger" onclick="acctDelete('${uid}')">删除</button>`;
-      return `<tr><td>${esc(a.nickname||'—')}</td><td class="mono">${uid}</td><td><b>${a.credits??0}</b></td><td>${badge}</td><td class="muted">${reason}</td><td class="muted">${exp}</td><td class="row-actions">${actions}</td></tr>`;
+      return `<tr><td>${esc(a.nickname||'—')}</td><td class="mono">${uid}</td><td><b>${a.credits??0}</b></td><td>${badge}</td><td class="muted">${reason}</td><td class="muted">${exp}</td><td class="muted">${lastc}</td><td class="row-actions">${actions}</td></tr>`;
     }).join('');
-    document.getElementById('accRows').innerHTML = rows || '<tr><td colspan="7" class="muted">还没有账号，用下面“添加账号”加一个</td></tr>';
+    document.getElementById('accRows').innerHTML = rows || '<tr><td colspan="8" class="muted">还没有账号，用下面“添加账号”加一个</td></tr>';
     renderStats(d.accounts);
   }catch(e){
     document.getElementById('accRows').innerHTML=`<tr><td colspan="7" style="color:var(--danger)">${esc(e.message)}</td></tr>`;
@@ -221,6 +223,18 @@ async function loadLogs(){
   }catch(e){
     document.getElementById('logRows').innerHTML=`<tr><td colspan="8" style="color:var(--danger)">${esc(e.message)}</td></tr>`;
   }
+}
+
+async function doCheckin(){
+  const btn=document.getElementById('btnCheckin');
+  btn.disabled=true; btn.textContent='签到中…';
+  try{
+    const d = await api('/console/api/checkin',{method:'POST'});
+    const parts = d.results.map(r=>`${r.uid}: ${r.credits!=null?r.credits+' 分':'失败 '+r.error}`);
+    showMsg('loginMsg','✅ 签到完成（'+d.checkin_time+'）：'+parts.join('；'),true);
+    refreshAccounts();
+  }catch(e){ showMsg('loginMsg','签到失败：'+e.message,false) }
+  finally{ btn.disabled=false; btn.textContent='签到' }
 }
 
 async function refreshCredits(){
