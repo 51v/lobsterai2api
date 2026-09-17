@@ -3,6 +3,7 @@ package upstream
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -11,14 +12,22 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"lobsterai2api/internal/auth"
 )
 
 const (
-	clientVersion = "0.1.0"
-	clientUA      = "LobsterAI/0.1.0"
+	defaultClientVersion = "0.1.0"
+	clientUA             = "LobsterAI/0.1.0"
+	updateAPIURL         = "https://api-overmind.youdao.com/openapi/get/luna/hardware/lobsterai/prod/update"
+)
+
+var (
+	clientVersionMu     sync.Mutex
+	clientVersionCached string
+	clientVersionAt     time.Time
 )
 
 // ServerBase returns the upstream API base URL from LB2A_UPSTREAM_BASE env.
@@ -97,7 +106,7 @@ func chatHeaders(req *http.Request, a *auth.Auth) {
 	req.Header.Set("Accept", "text/event-stream, application/json")
 	req.Header.Set("User-Agent", clientUA)
 	req.Header.Set("X-LobsterAI-Client-Capabilities", "kimi-k3-agentic-v1")
-	req.Header.Set("X-LobsterAI-Client-Version", clientVersion)
+	req.Header.Set("X-LobsterAI-Client-Version", resolveClientVersion())
 }
 
 // authHeaders 设置 auth 请求头（exchange/refresh 不需要 Bearer token）。
@@ -312,10 +321,173 @@ func (c *Client) QuotaUsage(a *auth.Auth) (remain int64, total int64, err error)
 	return 0, 0, fmt.Errorf("profile-summary: no credits")
 }
 
-// DailyCheckin 执行每日签到。目前龙虾签到端点未知，返回 nil（no-op）。
-// 后续抓包确定端点后再实现。
+// resolveClientVersion 拿官方最新客户端版本号（缓存 23h，失败回退默认值）。
+func resolveClientVersion() string {
+	clientVersionMu.Lock()
+	defer clientVersionMu.Unlock()
+	if clientVersionCached != "" && time.Since(clientVersionAt) < 23*time.Hour {
+		return clientVersionCached
+	}
+	v, err := fetchClientVersion()
+	if err != nil {
+		log.Printf("resolveClientVersion failed: %v, using default", err)
+		v = defaultClientVersion
+	}
+	clientVersionCached = v
+	clientVersionAt = time.Now()
+	return v
+}
+
+func fetchClientVersion() (string, error) {
+	req, err := http.NewRequest(http.MethodGet, updateAPIURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", clientUA)
+	req.Header.Set("Accept", "application/json")
+	cli := &http.Client{Timeout: 15 * time.Second}
+	resp, err := cli.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<18))
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("update api status %d", resp.StatusCode)
+	}
+	var env struct {
+		Data struct {
+			Value struct {
+				Version string `json:"version"`
+			} `json:"value"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return "", fmt.Errorf("parse version: %w", err)
+	}
+	if env.Data.Value.Version == "" {
+		return "", fmt.Errorf("empty version")
+	}
+	return env.Data.Value.Version, nil
+}
+
+// DailyCheckin 对所有注册账号执行每日签到（每天每个号 +100 积分）。
+// 流程：slot → context（判 claimedToday + check_in action）→ POST actions/check_in。
 func (c *Client) DailyCheckin(a *auth.Auth) error {
-	// TODO: LobsterAI daily sign-in endpoint TBD
-	// placeholder: return nil means "checkin skipped silently"
+	if strings.TrimSpace(a.AccessToken) == "" {
+		return fmt.Errorf("no accessToken")
+	}
+
+	ver := resolveClientVersion()
+	ua := "LobsterAI/" + ver
+	base := ServerBase()
+
+	// 1) 轮询签到 slot
+	q := "placement=desktop_sidebar&clientVersion=" + ver + "&containerApiVersion=2&platform=win32"
+	slotURL := base + "/api/client-activities/slot?" + q
+	req, _ := http.NewRequest(http.MethodGet, slotURL, nil)
+	req.Header.Set("Authorization", "Bearer "+a.AccessToken)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", ua)
+	data, err := c.doJSON(req)
+	if err != nil {
+		return fmt.Errorf("slot: %w", err)
+	}
+	var slot struct {
+		SlotState string `json:"slotState"`
+		Activity  struct {
+			ActivityCode   string `json:"activityCode"`
+			ConfigRevision int    `json:"configRevision"`
+		} `json:"activity"`
+	}
+	if err := json.Unmarshal(data, &slot); err != nil {
+		return fmt.Errorf("slot parse: %w", err)
+	}
+	if slot.SlotState != "available" || slot.Activity.ActivityCode == "" {
+		return fmt.Errorf("no check-in slot (state=%s)", slot.SlotState)
+	}
+	code := slot.Activity.ActivityCode
+	rev := slot.Activity.ConfigRevision
+
+	// 2) 查上下文（判断是否今天已签，有哪些 action 可用）
+	ctxURL := fmt.Sprintf("%s/api/client-activities/%s/context?configRevision=%d", base, code, rev)
+	req, _ = http.NewRequest(http.MethodGet, ctxURL, nil)
+	req.Header.Set("Authorization", "Bearer "+a.AccessToken)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", ua)
+	raw, err := c.doJSON(req)
+	if err != nil {
+		return fmt.Errorf("context: %w", err)
+	}
+	var ctx struct {
+		State struct {
+			ClaimedToday bool `json:"claimedToday"`
+		} `json:"state"`
+		Actions []string `json:"actions"`
+	}
+	if err := json.Unmarshal(raw, &ctx); err != nil {
+		return fmt.Errorf("context parse: %w", err)
+	}
+	if ctx.State.ClaimedToday {
+		return nil // 今天已签过，不算错
+	}
+	hasAction := false
+	for _, act := range ctx.Actions {
+		if act == "check_in" {
+			hasAction = true
+			break
+		}
+	}
+	if !hasAction {
+		return fmt.Errorf("check_in action not available")
+	}
+
+	// 3) 执行签到
+	idempotencyKey := uuid4()
+	checkinBody := map[string]any{
+		"configRevision": rev,
+		"idempotencyKey": idempotencyKey,
+		"payload":        map[string]any{},
+	}
+	checkinBytes, _ := json.Marshal(checkinBody)
+	checkinURL := fmt.Sprintf("%s/api/client-activities/%s/actions/check_in", base, code)
+	req, _ = http.NewRequest(http.MethodPost, checkinURL, bytes.NewReader(checkinBytes))
+	req.Header.Set("Authorization", "Bearer "+a.AccessToken)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", ua)
+	data, err = c.doJSON(req)
+	if err != nil {
+		return fmt.Errorf("check_in: %w", err)
+	}
+	var result struct {
+		Result struct {
+			CreditsGranted float64 `json:"creditsGranted"`
+			RewardCredits  float64 `json:"rewardCredits"`
+			Credits        float64 `json:"credits"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return fmt.Errorf("check_in parse: %w", err)
+	}
+	gained := result.Result.CreditsGranted
+	if gained == 0 {
+		gained = result.Result.RewardCredits
+	}
+	if gained == 0 {
+		gained = result.Result.Credits
+	}
+	if gained > 0 {
+		log.Printf("checkin %s: ✅ +%.0f 积分", a.UID, gained)
+	}
 	return nil
+}
+
+func uuid4() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }

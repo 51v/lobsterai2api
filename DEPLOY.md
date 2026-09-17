@@ -87,7 +87,7 @@ ENTRYPOINT ["/app/lobsterai2api", "-config", "/app/config.json"]
 要点：
 
 - `api_key`：本地 API 鉴权串，也是 Web 控制台的访问密钥，务必随机且够长（52 位随机串为宜）
-- `schedule` 两个时刻只做「余额刷新 + 账号解冻」，签到需外部脚本（见第七节）
+- `schedule` 两个时刻做「真实签到（+100 积分）+ 余额刷新 + 账号解冻」，签到已内置于 Go 代码（见第七节）
 - `upstream.base_url`：上游地址，也可用环境变量 `LB2A_UPSTREAM_BASE` 覆盖
 
 ### 4. 构建并启动
@@ -175,13 +175,30 @@ OpenAI SDK 接入：`base_url = http://<IP>:8367/v1`，`api_key` 同上。
 - 每日签到 +100 积分，30 天有效
 - 消耗比率（以 deepseek-flash 实测估算）：非缓存输入约 200 积分/1M tokens，输出约为输入 4 倍；各模型倍率不同，以 `/api/models/available` 返回的 `costMultiplier` 为准
 
-## 七、每日自动签到（可选）
+## 七、每日自动签到
 
-反代本身不自带签到（上游 `DailyCheckin` 是 no-op），需外部脚本。参考千灵教程的 `checkin.py`：读取 `auths/lobsterai-*.json` 的 accessToken，调上游 `client-activities` 接口完成签到，挂 crontab：
+签到已内置于 Go 服务，开箱即用，无需外部脚本。
+
+### 自动签到
+
+服务启动 5 秒后立即对全部账号签到一次；之后每天 9:00 和 21:00 自动执行（可在 `config.json` 的 `schedule.checkin_hours` 调整）。
+
+签到流程：调官方 update 接口拿 clientVersion → slot → context 判 `claimedToday` → POST `actions/check_in`。同一账号同一天幂等，重复触发不会多加分。
+
+### 手动签到
+
+Web 控制台的账号池卡片有「签到」按钮，点击即手动触发全部账号签到，结果实时回显。
+
+### 签到验证
+
+查看容器日志确认：
 
 ```bash
-5 9,21 * * * cd /data/lobsterai2api && /usr/bin/python3 checkin.py >> data/checkin.log 2>&1
+docker logs lobsterai2api | grep checkin
+# 预期输出: checkin 93881: ✅ +100 积分
 ```
+
+或看 Web 控制台账号列表的「最后签到」列。
 
 ## 八、运维备忘
 
